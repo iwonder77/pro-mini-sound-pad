@@ -25,15 +25,15 @@
 #define SEND_CS_PIN 11
 #define RECEIVE_CS_PIN 10
 #define BAUD_RATE 9600
-#define READ_INTERVAL_MS 20               // sampling period (ms)
-#define BASELINE_UPDATE_INTERVAL_MS 5000  // how often to update baseline (ms)
+#define READ_INTERVAL_MS 40               // sampling period (ms)
+#define BASELINE_UPDATE_INTERVAL_MS 1000  // how often to update baseline (ms)
 #define CS_SAMPLES 30                     // num samples for CapacitiveSensor library
 #define BASELINE_READING_WINDOW_SIZE 50   // num samples for RingWindow library
 #define SEND_OUT_PIN 9
 
 // === OBJECTS ===
 CapacitiveSensor cs = CapacitiveSensor(SEND_CS_PIN, RECEIVE_CS_PIN);
-RingWindow<long> baselineWindow(BASELINE_READING_WINDOW_SIZE);
+RingWindow<float> baselineWindow(BASELINE_READING_WINDOW_SIZE);
 
 // === TOUCH PAD STATE ===
 enum TouchPadState { IDLE,
@@ -42,25 +42,39 @@ enum TouchPadState { IDLE,
 TouchPadState state = IDLE;
 
 // === THRESHOLD VARIABLES ===
-const int TOUCH_OFFSET = 15;
-const int RELEASE_OFFSET = 5;
-const float BASELINE_UPDATE_TOLERANCE = 0.1f;  // only update baseline if delta is this % of baseline
-long baseline = 0;
-long touchThreshold = 0;
-long releaseThreshold = 0;
+const float TOUCH_OFFSET = 10;
+const float RELEASE_OFFSET = 5;
+const float BASELINE_UPDATE_TOLERANCE = 0.15f;  // only update baseline if delta is this % of baseline
+float baseline = 0;
+float touchThreshold = 0;
+float releaseThreshold = 0;
 
 // === TIMING VARIABLES ===
 uint32_t lastReadTime = 0;
 uint32_t lastBaselineUpdate = 0;
 
 // === DEBOUNCE ===
-const uint8_t DEBOUNCE_COUNT = 2;  // consecutive readings required
+const uint8_t DEBOUNCE_COUNT = 3;  // consecutive readings required
 uint8_t touchCounter = 0;          // counts consecutive "above threshold" readings
 uint8_t releaseCounter = 0;        // counts consecutive "below threshold" readings
 
 // === EMA variables ===
 float emaFilteredTouch = 0;
-const float ALPHA = 0.5f;
+const float ALPHA = 0.4f;
+
+// === PULSE CONTROL ===
+bool pulseActive = false;
+uint32_t pulseStartTime = 0;
+const uint16_t PULSE_DURATION_MS = 100;
+
+void managePulse() {
+  if (pulseActive) {
+    if (millis() - pulseStartTime >= PULSE_DURATION_MS) {
+      digitalWrite(SEND_OUT_PIN, LOW);
+      pulseActive = false;
+    }
+  }
+}
 
 void updateStateMachine() {
   switch (state) {
@@ -73,9 +87,10 @@ void updateStateMachine() {
           // if sufficient touch events counted then we can safely change the state to TOUCHED
           state = TOUCHED;
           touchCounter = 0;
+          // begin non-blocking pulse
           digitalWrite(SEND_OUT_PIN, HIGH);
-          delay(100);
-          digitalWrite(SEND_OUT_PIN, LOW);
+          pulseActive = true;
+          pulseStartTime = millis();
         }
       } else {
         // important to reset touch counter here
@@ -116,12 +131,17 @@ void setup() {
   Serial.println("--- Cap Touch Button w/ Pro Mini ---");
   Serial.println("Taking Baseline Readings - DO NOT TOUCH!");
   for (int i = 0; i < BASELINE_READING_WINDOW_SIZE; i++) {
-    baselineWindow.add(cs.capacitiveSensor(CS_SAMPLES));
+    long sample = cs.capacitiveSensor(CS_SAMPLES);
+    if (sample < 0) {
+      i--;
+      continue;
+    }
+    baselineWindow.add((float)sample);
     delay(10);
   }
 
-  // initialize baseline and ema
-  baseline = baselineWindow.median();
+  // initialize baseline with window AVERAGE
+  baseline = baselineWindow.average();
   touchThreshold = baseline + TOUCH_OFFSET;
   releaseThreshold = baseline + RELEASE_OFFSET;
   emaFilteredTouch = baseline;
@@ -148,7 +168,7 @@ void loop() {
   // --- periodic baseline update ---
   // only update baseline when it is NOT being touched (delta is small)
   if (now - lastBaselineUpdate >= BASELINE_UPDATE_INTERVAL_MS) {
-    if (abs(delta) < baseline * 0.1) {
+    if (abs(delta) < baseline * BASELINE_UPDATE_TOLERANCE) {
       baselineWindow.add(emaFilteredTouch);
       baseline = baselineWindow.median();
       touchThreshold = baseline + TOUCH_OFFSET;
@@ -157,6 +177,7 @@ void loop() {
     lastBaselineUpdate = now;
   }
 
+  managePulse();
   updateStateMachine();
 
   // --- output to Serial Plotter ---
