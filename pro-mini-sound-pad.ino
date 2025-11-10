@@ -25,15 +25,17 @@
 #define SEND_CS_PIN 11
 #define RECEIVE_CS_PIN 10
 #define BAUD_RATE 9600
-#define READ_INTERVAL_MS 40               // sampling period (ms)
-#define BASELINE_UPDATE_INTERVAL_MS 1000  // how often to update baseline (ms)
-#define CS_SAMPLES 30                     // num samples for CapacitiveSensor library
-#define BASELINE_READING_WINDOW_SIZE 50   // num samples for RingWindow library
+#define READ_INTERVAL_MS 40              // sampling period (ms)
+#define BASELINE_UPDATE_INTERVAL_MS 500  // how often to update baseline (ms)
+#define CS_SAMPLES 30                    // num samples for CapacitiveSensor library
+#define BASELINE_READING_WINDOW_SIZE 50  // num samples for baseline window
+#define MEDIAN_WINDOW_SIZE 7            // num samples for average window
 #define SEND_OUT_PIN 9
 
 // === OBJECTS ===
 CapacitiveSensor cs = CapacitiveSensor(SEND_CS_PIN, RECEIVE_CS_PIN);
 RingWindow<float> baselineWindow(BASELINE_READING_WINDOW_SIZE);
+RingWindow<float> medianWindow(MEDIAN_WINDOW_SIZE);
 
 // === TOUCH PAD STATE ===
 enum TouchPadState { IDLE,
@@ -42,8 +44,8 @@ enum TouchPadState { IDLE,
 TouchPadState state = IDLE;
 
 // === THRESHOLD VARIABLES ===
-const float TOUCH_OFFSET = 10;
-const float RELEASE_OFFSET = 5;
+const float TOUCH_OFFSET = 25;
+const float RELEASE_OFFSET = 10;
 const float BASELINE_UPDATE_TOLERANCE = 0.15f;  // only update baseline if delta is this % of baseline
 float baseline = 0;
 float touchThreshold = 0;
@@ -60,7 +62,7 @@ uint8_t releaseCounter = 0;        // counts consecutive "below threshold" readi
 
 // === EMA variables ===
 float emaFilteredTouch = 0;
-const float ALPHA = 0.4f;
+const float ALPHA = 0.45f;
 
 // === PULSE CONTROL ===
 bool pulseActive = false;
@@ -121,12 +123,14 @@ void updateStateMachine() {
 }
 
 void setup() {
+  pinMode(SEND_OUT_PIN, OUTPUT);
+  digitalWrite(SEND_OUT_PIN, LOW);
+
   cs.set_CS_AutocaL_Millis(0xFFFFFFFF);  // turn off autocalibrate on channel 1 - just as an example
+  delay(200);
   Serial.begin(BAUD_RATE);
   delay(2000);
 
-  pinMode(SEND_OUT_PIN, OUTPUT);
-  digitalWrite(SEND_OUT_PIN, LOW);
 
   Serial.println("--- Cap Touch Button w/ Pro Mini ---");
   Serial.println("Taking Baseline Readings - DO NOT TOUCH!");
@@ -145,6 +149,7 @@ void setup() {
   touchThreshold = baseline + TOUCH_OFFSET;
   releaseThreshold = baseline + RELEASE_OFFSET;
   emaFilteredTouch = baseline;
+  medianWindow.add(baseline);
 
   Serial.print("Baseline value: ");
   Serial.println(baseline);
@@ -159,21 +164,23 @@ void loop() {
 
   long rawResult = cs.capacitiveSensor(CS_SAMPLES);
   if (rawResult < 0) return;
+  medianWindow.add((float)rawResult);
+  float medianFiltered = medianWindow.median();
 
-  emaFilteredTouch = ALPHA * rawResult + (1 - ALPHA) * emaFilteredTouch;
+  emaFilteredTouch = ALPHA * medianFiltered + (1 - ALPHA) * emaFilteredTouch;
 
   // calculate difference between touch readings and baseline
   long delta = emaFilteredTouch - baseline;
 
   // --- periodic baseline update ---
-  // only update baseline when it is NOT being touched (delta is small)
+  // TODO: find another way to detect when baseline is not being touched
+  // only update baseline when it is NOT being touched
   if (now - lastBaselineUpdate >= BASELINE_UPDATE_INTERVAL_MS) {
-    if (abs(delta) < baseline * BASELINE_UPDATE_TOLERANCE) {
-      baselineWindow.add(emaFilteredTouch);
-      baseline = baselineWindow.median();
-      touchThreshold = baseline + TOUCH_OFFSET;
-      releaseThreshold = baseline + RELEASE_OFFSET;
-    }
+    //if (abs(delta) < baseline * BASELINE_UPDATE_TOLERANCE) {
+    baselineWindow.add(emaFilteredTouch);
+    baseline = baselineWindow.average();
+    touchThreshold = baseline + TOUCH_OFFSET;
+    releaseThreshold = baseline + RELEASE_OFFSET;
     lastBaselineUpdate = now;
   }
 
@@ -181,20 +188,22 @@ void loop() {
   updateStateMachine();
 
   // --- output to Serial Plotter ---
-  Serial.print(rawResult);
-  Serial.print("\t");
+  //Serial.print(rawResult);
+  //Serial.print(",");
+  Serial.print(medianFiltered);
+  Serial.print(",");
   Serial.print(emaFilteredTouch, 1);  // 1 decimal place
-  Serial.print("\t");
+  Serial.print(",");
   Serial.print(baseline);
-  Serial.print("\t");
-  Serial.print(delta);
-  Serial.print("\t");
-
-  switch (state) {
-    case IDLE: Serial.print("IDLE"); break;
-    case TOUCHED: Serial.print("TOUCHED"); break;
-    case RELEASED: Serial.print("RELEASED"); break;
-  }
+  Serial.print(",");
+  //Serial.print(delta);
+  //Serial.print(",");
+  Serial.print((state == TOUCHED) ? baseline + 50 : baseline);  // visual pulse when touched
+  // switch (state) {
+  //   case IDLE: Serial.print("IDLE"); break;
+  //   case TOUCHED: Serial.print("TOUCHED"); break;
+  //   case RELEASED: Serial.print("RELEASED"); break;
+  // }
 
   Serial.println();
 }
