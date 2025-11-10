@@ -1,0 +1,2 @@
+default_fqbn: arduino:avr:pro:cpu=8MHzatmega328
+default_port: /dev/cu.usbserial-BG01OPO3
